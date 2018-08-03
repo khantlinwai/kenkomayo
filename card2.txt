@@ -1,0 +1,399 @@
+<?php
+
+namespace App\Services;
+
+use App\Contracts\Dao\EntryDaoInterface;
+use App\Contracts\Services\PDFServiceInterface;
+use PHPExcel_Cell;
+use PHPExcel_IOFactory;
+use App\Models\Entry;
+
+class PDFService implements PDFServiceInterface
+{
+    private $entryDao;
+
+    /**
+     * Constructor
+     *
+     * @param EntryDaoInterface $entryDao
+     */
+    public function __construct(EntryDaoInterface $entryDao)
+    {
+        $this->entryDao = $entryDao;
+    }
+
+    /**
+     * PDF Download
+     *
+     * @param Request $request
+     * @return void
+     */
+    public function entry_one_pdf($no)
+    {
+        $one = array();
+        if ($no) {
+            $one[] = $this->entryDao->getEntryArrayInfo($no);
+        }
+        if (count($one) == 0) {
+            return false;
+        }
+        $this->pdf_cps($one);
+        return true;
+    }
+
+    /**
+     * Upload PDF
+     *
+     * @return void
+     */
+    public function pdf_upload($request)
+    {
+        $file_name = "pdf_upfile";
+
+        if (empty($_FILES[$file_name]['name'])) {
+            $error_msg = "ファイルがありません";
+            $this->pdf_cps(array(array("error_msg" => $error_msg)));
+        }
+        $a1 = $_FILES[$file_name]['name'];
+        $a2 = $_FILES[$file_name]['size'];
+        $a3 = $_FILES[$file_name]['type'];
+        $a4 = $_FILES[$file_name]['tmp_name'];
+
+        $type = substr($a1, strrpos($a1, '.'));
+        $aa1 = preg_replace("/.xlsx/i", "", $type);
+
+        if (($aa1 != "")) {
+            $error_msg = "ファイル形式が正しくありません(拡張子は xlsxのみ)";
+            $this->pdf_cps(array(array("error_msg" => $error_msg)));
+        }
+
+        setlocale(LC_ALL, 'ja_JP.UTF-8');
+        $msg = "";
+        try {
+            $inputFileType = 'Excel2007';
+            $inputFileName = $a4;
+
+            $objReader = PHPExcel_IOFactory::createReader($inputFileType);
+            $objPHPExcel = $objReader->load($inputFileName);
+            $objPHPExcel->setActiveSheetIndex(0);
+            $worksheet = $objPHPExcel->getActiveSheet();
+
+            $read_max_col = 1;
+
+            $row_max = $worksheet->getHighestRow();
+            $col_max = PHPExcel_Cell::columnIndexFromString($worksheet->getHighestColumn()) - 1;
+
+            $row_first = 4;
+
+            $data = array();
+            for ($j = $row_first; $j <= $row_max; $j++) {
+                for ($i = 1; $i < $read_max_col; $i++) {
+                    $data[$j][$i] = "";
+                }
+            }
+            $last_row = 0;
+            //行でループ
+            foreach ($worksheet->getRowIterator() as $row) {
+                $row_no = $row->getRowIndex();
+                if ($row_no < $row_first) { //行数　1行は ヘッダー で、無視
+                    continue;
+                }
+                //列でループ
+                foreach ($row->getCellIterator() as $col_no => $cell) {
+                    if ($col_no > $read_max_col) { //列数
+                        continue;
+                    }
+
+                    if (!is_null($cell)) {
+                        $data[$row_no][$col_no + 1] = (string) $cell->getValue();
+                    }
+                }
+                if ($data[$row_no][1] === "END") {
+                    $last_row = $row_no;
+                    break;
+                }
+            }
+            if ($last_row == 0) {
+                $error_msg = "ファイルに終わりの行がありません(end)";
+                msg_disp($error_msg, "j_alert");
+                exit;
+            }
+
+            $error_msg_arr = array();
+            $one_arr = array();
+            for ($i = $row_first; $i < $last_row; $i++) {
+                if ($data[$i][1]) {
+                    $one = $this->get_entry_one($data[$i][1]);
+                    if ($one[0]['no']) {
+                        $one_arr[] = $one;
+                    } else {
+                        $error_msg_arr[] = $i . "行のNoがみつかりません";
+                    }
+                } else {
+                    $error_msg_arr[] = $i . "行のNoがありません";
+                }
+
+            }
+            if (count($error_msg_arr) > 0) {
+                $error_msg = "エラーがあります、ご確認ください。\n" . implode($error_msg_arr, "\n");
+                // action_his(__FUNCTION__." error");
+                $this->pdf_cps(array(array("error_msg" => $error_msg)));
+            } else {
+                $pkind = $request->pkind;
+
+                // action_his(__FUNCTION__,array("pkind"=>$pkind),count($one_arr));
+                $this->pdf_cps($one_arr, '', $pkind);
+            }
+
+        } catch (Exception $e) {
+            $error_msg = "ファイルが取り込めません\n" . $e->getmessage();
+            $this->pdf_cps(array(array("error_msg" => $error_msg)));
+        }
+
+    }
+
+    /**
+     * PDF
+     *
+     * @param [type] $p_date
+     * @param string $pdf_tmp_name
+     * @param integer $pkind
+     * @return void
+     */
+    private function pdf_cps($p_date, $pdf_tmp_name = '2017_A4_empty.pdf', $pkind = 1)
+    {
+        require_once app_path() . '/Libs/tcpdf/tcpdf.php';
+        require_once app_path() . '/Libs/tcpdf/fpdi.php';
+        $pdf_dir = resource_path() . '/manage_tpl';
+
+        $receipt = new \FPDI();
+        // ヘッダーの出力を無効化
+        $receipt->setPrintHeader(false);
+        // フッターの出力を無効化
+        $receipt->setPrintFooter(false);
+        $receipt->SetTextColor(0, 0, 0);
+        $receipt->SetDrawColor(0, 0, 0);
+
+        if ($pdf_tmp_name) {
+            // テンプレートを読み込み
+            $receipt->setSourceFile($pdf_dir . "/" . $pdf_tmp_name);
+        } else {
+            $receipt->setSourceFile($pdf_dir . "/2017_A4_empty.pdf");
+        }
+        $receipt->SetAutoPageBreak(false);
+        $receipt->SetMargins(0, 0, 0, true);
+        // 読み込んだPDFの1ページ目のインデックスを取得
+        $tplIdx = $receipt->importPage(1);
+
+        //テスト用　本番削除
+        //$receipt->SetTextColor(255, 0, 0);
+        if (isset($p_date[0]['error_msg'])) {
+            //$receipt->SetFont('arialuni', '', 10, '', true);
+            $receipt->AddPage();
+            $receipt->useTemplate($tplIdx, null, null, null, null, true);
+            $receipt->SetFont('hgrge001', '', 10, '', true);
+            $receipt->SetXY(0, 10);
+            $receipt->Write(0, $p_date[0]['error_msg']);
+        } else {
+            foreach ($p_date as $k => $v) {
+                if ($pkind == 3) {
+                    if ($k % 3 == 0) {
+                        $receipt->AddPage();
+                        //$receipt->useTemplate($tplIdx, null, null, null, null, true);
+                    }
+
+                    $this->pdf_print_one($receipt, $v[0], $k % 3);
+                } else {
+                    $this->pdf_one_page($receipt, $tplIdx, $v[0], $pdf_tmp_name);
+                }
+            }
+        }
+
+        $time = gettimeofday();
+        $now = date("Y_m_d_H_i", $time['sec']);
+        $file_name = "kenkomayo_2017_" . $now . ".pdf";
+        $receipt->Output($file_name, 'D');
+        exit;
+    }
+
+    /**
+     * Get Data
+     *
+     * @param [type] $no
+     * @return void
+     */
+    private function get_entry_one($no)
+    {
+        if ($no == 0 || $no == "") {
+            return array();
+        }
+        $one = $this->entryDao->getEntryArrayInfo($no);
+        $one[0]['q_8'] = explode('.', $one[0]['q_8']);
+        return $one;
+    }
+
+    /**
+     * Excel Upload and Download 1 Page Design
+     *
+     * @param [type] $receipt
+     * @param [type] $tplIdx
+     * @param [type] $one
+     * @param [type] $pdf_tmp_name
+     * @return void
+     */
+    private function pdf_one_page($receipt, $tplIdx, $one, $pdf_tmp_name)
+    {
+        // ページを追加
+        $receipt->AddPage();
+        // 読み込んだPDFの1ページ目をテンプレートとして使用
+        $receipt->useTemplate($tplIdx, null, null, null, null, true);
+
+        $this->pdf_print_one($receipt, $one);
+    }
+
+    /**
+     * PDF Print
+     *
+     * @param [type] $receipt
+     * @param [type] $one
+     * @param integer $kh
+     * @return void
+     */
+    private function pdf_print_one($receipt, $one, $kh = 0)
+    {
+        $q_8 = array();
+        if (is_array($one['q_8'])) {
+            foreach ($one['q_8'] as $k => $v) {
+                if ($v) {
+                    if ($v <= 10) {
+                        $q_8[0] = "外";
+                    } else if ($v == 19) {
+                        $q_8[] = "他";
+                    } else {
+                        $q_8[] = mb_substr(config('constants.Q8_LIST')[$v], 0, 1, 'UTF-8');
+                    }
+                }
+            }
+        }
+
+        $one_hh = 98.15;
+        $this_h = $one_hh * $kh;
+        
+        $this->pdfPrintString($receipt, $one['zip'] , 20.6, 21.8 + $this_h, 7, 72); //g1 0-1
+        $this->pdfPrintString($receipt, $one['address1'], 20.6, 24.4 + $this_h, 7, 72);//g1 0-2
+        $this->pdfPrintString($receipt, $one['address2'], 20.6, 27.4 + $this_h, 7, 72);//g1
+        $this->pdfPrintString($receipt, $one['address3'], 20.6, 30.4 + $this_h, 7, 72);//g1
+
+        $this->pdfPrintString($receipt, mb_substr($one['company_name1'],0,12,'UTF-8'), 20.6, 33.4 + $this_h, 14, 72);//g1 left
+        $this->pdfPrintString($receipt, mb_substr($one['company_name2'],12,12,'UTF-8'), 20.6, 37.99 + $this_h, 14, 72);//g1 left +4.59(13pt)        
+        
+        $this->pdfPrintString($receipt, mb_substr($one['company_name1'],0,12,'UTF-8'), 127.3, 15.8 + $this_h, 19, 82);//g1 right
+        $this->pdfPrintString($receipt, mb_substr($one['company_name2'],12,12,'UTF-8'), 127.3, 23.56 + $this_h, 19, 82);//g1 right +7.76(22pt)       
+
+        $this->pdfPrintString($receipt, mb_substr($one['branch_name1'],0,20,'UTF-8'), 20.8, 42.5 + $this_h, 8, 72); //g1 left
+        $this->pdfPrintString($receipt, mb_substr($one['position1'],20,20,'UTF-8'), 20.8, 45.68 + $this_h, 8, 72); //g1 left +3.18(9pt)
+        $this->pdfPrintString($receipt, mb_substr($one['branch_name2'],40,20,'UTF-8'), 20.8, 48.86 + $this_h, 8, 72); //g1 left
+        $this->pdfPrintString($receipt, mb_substr($one['position2'],60,20,'UTF-8'), 20.8, 52.04 + $this_h, 8, 72); //g1 left       
+
+        $this->pdfPrintString($receipt, mb_substr($one['branch_name1'],0,20,'UTF-8'), 127.6, 35.0 + $this_h, 10, 72); //g1 right
+        $this->pdfPrintString($receipt, mb_substr($one['branch_name1'],0,20,'UTF-8'), 127.6, 39.23 + $this_h, 10, 72); //g1 right +4.23(12pt)
+        $this->pdfPrintString($receipt, mb_substr($one['branch_name2'],40,20,'UTF-8'), 127.6, 43.46 + $this_h, 10, 72); //g1 right
+        $this->pdfPrintString($receipt, mb_substr($one['position2'],60,20,'UTF-8'), 127.6, 47.69 + $this_h, 10, 72); //g1 right        
+
+        if ($one['guest_name']) {
+            $this->pdfPrintString($receipt, $one['guest_name'] . " 様", 20.8, 60.6 + $this_h, 21, 72);//g1 left
+            $this->pdfPrintString($receipt, $one['guest_name'] . " 様", 127.5, 54.6 + $this_h, 23, 78);//g1 right           
+        }
+
+        $this->pdfPrintString($receipt, $one['head_short_name'], 10.5, 83.7 + $this_h, 7, 60);//g1 left
+        $this->pdfPrintString($receipt, $one['head_name'], 10.5, 86.9 + $this_h, 7, 60);//g1 left
+        $this->pdfPrintString($receipt, $one['staff_name'], 10.5, 90.4 + $this_h, 8, 60);//g1 left        
+
+        $this->pdfPrintString($receipt,$one['head_short_name'], 128.6, 76.5 + $this_h, 16, 90);//g1 right
+        $this->pdfPrintString($receipt, $one['business category'], 128.6, 94.5 + $this_h, 16, 120);//g1 right            
+
+        $this->pdfPrintString($receipt, $one['invitation_president'], 88.4, 96.5 + $this_h, 16,72);//g1 left        
+        $this->pdfPrintString($receipt, $one['invitation_president'], 175.5, 95.5 + $this_h, 16,78);//g1 right        
+
+        $s_barcode = substr($one['qr'], 0, 1) . "     " . substr($one['qr'], 1, 2) . " " . substr($one['qr'], 3, 3);
+
+        $this->pdfPrintStringB($receipt, $s_barcode, 99.7, 98.5 + $this_h, 8); //qr g1 left
+        $receipt->write2DBarcode($one['qr'], 'QRCODE,H', 102.7, 84.5 + $this_h, 12, 12); //qrcode g1 left      
+     
+        $this->pdfPrintStringB($receipt, $s_barcode, 189.2, 96.3 + $this_h, 10); //qr g1 right
+        $receipt->write2DBarcode($one['qr'], 'QRCODE,H', 183.8, 76 + $this_h, 18, 18); //qrcode g1 right      
+
+    }
+
+    /**
+     * PDF Print String
+     *
+     * @param [type] $receipt
+     * @param [type] $s
+     * @param [type] $x
+     * @param [type] $y
+     * @param [type] $size
+     * @param integer $max_width
+     * @param string $align
+     * @return void
+     */
+    private function pdfPrintString($receipt, $s, $x, $y, $size, $max_width = 70, $align = "L")
+    {
+        $fsize = $size; //pdfGetFontSize($size,$s,$max_count);
+        // 書き込む文字列のフォントを指定
+        //$receipt->SetFont('arialuni', '', $fsize, '', true);
+        $receipt->SetFont('hgrge001', '', $fsize, '', true);
+
+        $receipt->SetXY($x, $y);
+        // 文字列を書き込む
+        $receipt->Cell($max_width //矩形領域の幅、0であれば、ページ右まで自動的に拡張される。
+            , 5//矩形領域の高さ
+            , $s, 0//境界線
+            //            ,1 //境界線
+            , 0//カーソルの移動方法
+            , $align //テキストの整列 L or 空文字: 左揃え,C: 中央揃え,R: 右揃え
+            , false//矩形領域の塗つぶし
+            , '' //登録するリンク先のURL
+            , 1//テキストの伸縮
+            , true//矩形領域の高さの最小値調整
+            , 'C' //Y座標に対するセルの配置
+            , 'M' //セルの中のテキストの垂直方向の配置
+        );
+    }
+
+    /**
+     * PDF Print String B
+     *
+     * @param [type] $receipt
+     * @param [type] $s
+     * @param [type] $x
+     * @param [type] $y
+     * @param [type] $size
+     * @param integer $max_width
+     * @param string $align
+     * @return void
+     */
+    private function pdfPrintStringB($receipt, $s, $x, $y, $size, $max_width = 70, $align = "L")
+    {
+
+        $fsize = $size; //pdfGetFontSize($size,$s,$max_count);
+        // 書き込む文字列のフォントを指定
+        $receipt->SetFont('arialuni', '', $fsize, '', true);
+
+        $receipt->SetXY($x, $y);
+        // 文字列を書き込む
+        $receipt->Cell($max_width //矩形領域の幅、0であれば、ページ右まで自動的に拡張される。
+            , 5//矩形領域の高さ
+            , $s, 0//境界線
+            //            ,1 //境界線
+            , 0//カーソルの移動方法
+            , $align //テキストの整列 L or 空文字: 左揃え,C: 中央揃え,R: 右揃え
+            , false//矩形領域の塗つぶし
+            , '' //登録するリンク先のURL
+            , 1//テキストの伸縮
+            , true//矩形領域の高さの最小値調整
+            , 'C' //Y座標に対するセルの配置
+            , 'M' //セルの中のテキストの垂直方向の配置
+        );
+    }
+}
