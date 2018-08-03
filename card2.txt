@@ -8,7 +8,7 @@ use PHPExcel_Cell;
 use PHPExcel_IOFactory;
 use App\Models\Entry;
 
-class PDFService implements PDFServiceInterface
+class PDF123Service implements PDFServiceInterface
 {
     private $entryDao;
 
